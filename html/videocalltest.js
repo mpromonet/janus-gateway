@@ -122,6 +122,13 @@ $(document).ready(function() {
 										$.unblockUI();
 									}
 								},
+								mediaState: function(medium, on) {
+									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium);
+								},
+								webrtcState: function(on) {
+									Janus.log("Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
+									$("#videoleft").parent().unblock();
+								},
 								onmessage: function(msg, jsep) {
 									Janus.debug(" ::: Got a message :::");
 									Janus.debug(JSON.stringify(msg));
@@ -242,8 +249,16 @@ $(document).ready(function() {
 									$('#videos').removeClass('hide').show();
 									if($('#myvideo').length === 0)
 										$('#videoleft').append('<video class="rounded centered" id="myvideo" width=320 height=240 autoplay muted="muted"/>');
-									attachMediaStream($('#myvideo').get(0), stream);
+									Janus.attachMediaStream($('#myvideo').get(0), stream);
 									$("#myvideo").get(0).muted = "muted";
+									$("#videoleft").parent().block({
+										message: '<b>Publishing...</b>',
+										css: {
+											border: 'none',
+											backgroundColor: 'transparent',
+											color: 'white'
+										}
+									});
 									// No remote video yet
 									$('#videoright').append('<video class="rounded centered" id="waitingvideo" width=320 height=240 />');
 									if(spinner == null) {
@@ -278,7 +293,7 @@ $(document).ready(function() {
 										var width = this.videoWidth;
 										var height = this.videoHeight;
 										$('#curres').removeClass('hide').text(width+'x'+height).show();
-										if(webrtcDetectedBrowser == "firefox") {
+										if(adapter.browserDetails.browser === "firefox") {
 											// Firefox Stable has a bug: width and height are not immediately available after a playing
 											setTimeout(function() {
 												var width = $("#remotevideo").get(0).videoWidth;
@@ -287,7 +302,7 @@ $(document).ready(function() {
 											}, 2000);
 										}
 									});
-									attachMediaStream($('#remotevideo').get(0), stream);
+									Janus.attachMediaStream($('#remotevideo').get(0), stream);
 									var videoTracks = stream.getVideoTracks();
 									if(videoTracks === null || videoTracks === undefined || videoTracks.length === 0 || videoTracks[0].muted) {
 										// No remote video
@@ -336,7 +351,7 @@ $(document).ready(function() {
 										videocall.send({"message": { "request": "set", "bitrate": bitrate }});
 										return false;
 									});
-									if(webrtcDetectedBrowser == "chrome" || webrtcDetectedBrowser == "firefox") {
+									if(adapter.browserDetails.browser === "chrome" || adapter.browserDetails.browser === "firefox") {
 										$('#curbitrate').removeClass('hide').show();
 										bitrateTimer = setInterval(function() {
 											// Display updated bitrate, if supported
@@ -358,6 +373,7 @@ $(document).ready(function() {
 									Janus.log(" ::: Got a cleanup notification :::");
 									$('#myvideo').remove();
 									$('#remotevideo').remove();
+									$("#videoleft").parent().unblock();
 									$('#callee').empty().hide();
 									yourusername = null;
 									$('#curbitrate').hide();

@@ -121,6 +121,10 @@ $(document).ready(function() {
 										$.unblockUI();
 									}
 								},
+								webrtcState: function(on) {
+									Janus.log("Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
+									$("#videobox").parent().unblock();
+								},
 								onmessage: function(msg, jsep) {
 									Janus.debug(" ::: Got a message :::");
 									Janus.debug(JSON.stringify(msg));
@@ -145,6 +149,8 @@ $(document).ready(function() {
 															bootbox.alert("WebRTC error... " + JSON.stringify(error));
 														}
 													});
+												if(result["warning"])
+													bootbox.alert(result["warning"]);
 											} else if(event === 'recording') {
 												// Got an ANSWER to our recording OFFER
 												if(jsep !== null && jsep !== undefined)
@@ -228,8 +234,16 @@ $(document).ready(function() {
 									$('#video').removeClass('hide').show();
 									if($('#thevideo').length === 0)
 										$('#videobox').append('<video class="rounded centered" id="thevideo" width=320 height=240 autoplay muted="muted"/>');
-									attachMediaStream($('#thevideo').get(0), stream);
+									Janus.attachMediaStream($('#thevideo').get(0), stream);
 									$("#thevideo").get(0).muted = "muted";
+									$("#videobox").parent().block({
+										message: '<b>Publishing...</b>',
+										css: {
+											border: 'none',
+											backgroundColor: 'transparent',
+											color: 'white'
+										}
+									});
 								},
 								onremotestream: function(stream) {
 									if(playing === false)
@@ -258,7 +272,7 @@ $(document).ready(function() {
 											spinner.stop();
 										spinner = null;
 									});
-									attachMediaStream($('#thevideo').get(0), stream);
+									Janus.attachMediaStream($('#thevideo').get(0), stream);
 								},
 								oncleanup: function() {
 									Janus.log(" ::: Got a cleanup notification :::");
@@ -268,6 +282,7 @@ $(document).ready(function() {
 										spinner.stop();
 									spinner = null;
 									$('#videobox').empty();
+									$("#videobox").parent().unblock();
 									$('#video').hide();
 									recording = false;
 									playing = false;

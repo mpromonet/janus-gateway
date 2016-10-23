@@ -1,4 +1,4 @@
-AC_INIT([Janus Gateway],[0.1.0],[https://github.com/meetecho/janus-gateway],[janus-gateway],[https://janus.conf.meetecho.com])
+AC_INIT([Janus Gateway],[0.2.1],[https://github.com/meetecho/janus-gateway],[janus-gateway],[https://janus.conf.meetecho.com])
 AC_CONFIG_AUX_DIR([.])
 AC_CONFIG_MACRO_DIR([m4])
 
@@ -17,7 +17,8 @@ LT_INIT
 
 case "$host_os" in
 darwin*)
-	LDFLAGS="$LDFLAGS -L/usr/local/lib -L/usr/local/opt/openssl/lib"
+	CFLAGS="$CFLAGS -I/usr/local/opt/openssl/include"
+	LDFLAGS="$LDFLAGS -L/usr/local/lib -L/usr/local/opt/openssl/lib -L/opt/local/lib"
 	AM_CONDITIONAL([DARWIN_OS], true)
 	AM_CONDITIONAL([HAS_DTLS_WINDOW_SIZE], false)
 ;;
@@ -63,11 +64,29 @@ AC_ARG_ENABLE([rabbitmq],
               [],
               [enable_rabbitmq=yes])
 
+AC_ARG_ENABLE([mqtt],
+              [AS_HELP_STRING([--disable-mqtt],
+                              [Disable MQTT integration])],
+              [],
+              [enable_mqtt=yes])
+
+AC_ARG_ENABLE([unix-sockets],
+              [AS_HELP_STRING([--disable-unix-sockets],
+                              [Disable Unix Sockets integration])],
+              [],
+              [enable_pfunix=yes])
+
 AC_ARG_ENABLE([boringssl],
               [AS_HELP_STRING([--enable-boringssl],
                               [Use BoringSSL instead of OpenSSL])],
               [],
               [enable_boringssl=no])
+
+AC_ARG_ENABLE([dtls-settimeout],
+              [AS_HELP_STRING([--enable-dtls-settimeout],
+                              [Use DTLSv1_set_initial_timeout_duration (only available in recent BoringSSL versions)])],
+              [],
+              [enable_dtls_settimeout=no])
 
 AC_ARG_ENABLE([turn-rest-api],
               [AS_HELP_STRING([--disable-turn-rest-api],
@@ -82,8 +101,8 @@ PKG_CHECK_MODULES([JANUS],
                     jansson
                     libssl >= $ssl_version
                     libcrypto
-                    sofia-sip-ua
                   ])
+JANUS_MANUAL_LIBS+=" -lm"
 AC_SUBST(JANUS_MANUAL_LIBS)
 
 AS_IF([test "x$enable_boringssl" = "xyes"],
@@ -93,11 +112,17 @@ AS_IF([test "x$enable_boringssl" = "xyes"],
        AC_SUBST(BORINGSSL_CFLAGS)
 	   BORINGSSL_LIBS=" -L/opt/boringssl/lib";
        AC_SUBST(BORINGSSL_LIBS)
-	   AC_CHECK_HEADERS([openssl/opensslfeatures.h],
+	   AC_CHECK_HEADERS([openssl/opensslconf.h],
 	                    [],
 	                    [AC_MSG_ERROR([BoringSSL headers not found in /opt/boringssl, use --disable-boringssl if you want to use OpenSSL instead])])
       ])
 AM_CONDITIONAL([ENABLE_BORINGSSL], [test "x$enable_boringssl" = "xyes"])
+
+AS_IF([test "x$enable_dtls_settimeout" = "xyes"],
+      [
+      AC_DEFINE(HAVE_DTLS_SETTIMEOUT)
+      AC_MSG_NOTICE([Assuming DTLSv1_set_initial_timeout_duration is available])
+      ])
 
 AC_CHECK_LIB([nice],
              [nice_agent_set_port_range],
@@ -194,6 +219,8 @@ PKG_CHECK_MODULES([MHD],
                     AS_IF([test "x$enable_rest" = "xyes"],
                           [AC_MSG_ERROR([libmicrohttpd not found. See README.md for installation instructions or use --disable-rest])])
                   ])
+AC_SUBST([MHD_CFLAGS])
+AC_SUBST([MHD_LIBS])
 AM_CONDITIONAL([ENABLE_REST], [test "x$enable_rest" = "xyes"])
 
 AM_CONDITIONAL([ENABLE_WEBSOCKETS_NEWAPI], false)
@@ -238,7 +265,42 @@ AC_CHECK_LIB([rabbitmq],
                AS_IF([test "x$enable_rabbitmq" = "xyes"],
                      [AC_MSG_ERROR([rabbitmq-c not found. See README.md for installation instructions or use --disable-rabbitmq])])
              ])
+AC_CHECK_LIB([paho-mqtt3a],
+             [MQTTAsync_create],
+             [
+               AS_IF([test "x$enable_mqtt" = "xyes"],
+               [
+                  AC_DEFINE(HAVE_MQTT)
+               ])
+             ],
+             [
+               AS_IF([test "x$enable_mqtt" = "xyes"],
+                     [AC_MSG_ERROR([paho c client not found. See README.md for installation instructions or use --disable-mqtt])])
+             ])
 AM_CONDITIONAL([ENABLE_RABBITMQ], [test "x$enable_rabbitmq" = "xyes"])
+AM_CONDITIONAL([ENABLE_MQTT], [test "x$enable_mqtt" = "xyes"])
+
+AC_TRY_COMPILE([
+               #include <stdlib.h>
+               #include <sys/socket.h>
+               #include <sys/un.h>
+               void test() {
+                 int pfd = socket(PF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK, 0);
+                 if(pfd < 0)
+                   exit(1);
+               }],
+               [],
+               [
+                 AS_IF([test "x$enable_pfunix" = "xyes"],
+                 [
+                    AC_DEFINE(HAVE_PFUNIX)
+                 ])
+               ],
+               [
+                 AS_IF([test "x$enable_pfunix" = "xyes"],
+                       [AC_MSG_ERROR([SOCK_SEQPACKET not defined in your OS. Use --disable-unix-sockets])])
+               ])
+AM_CONDITIONAL([ENABLE_PFUNIX], [test "x$enable_pfunix" = "xyes"])
 
 
 ##
@@ -248,7 +310,6 @@ AM_CONDITIONAL([ENABLE_RABBITMQ], [test "x$enable_rabbitmq" = "xyes"])
 PKG_CHECK_MODULES([PLUGINS],
                   [
                     glib-2.0 >= $glib_version
-                    sofia-sip-ua
                     jansson
                   ])
 
@@ -300,6 +361,22 @@ AC_ARG_ENABLE([plugin-voicemail],
               [],
               [enable_plugin_voicemail=yes])
 
+AC_ARG_ENABLE([plugin-textroom],
+              [AS_HELP_STRING([--disable-plugin-textroom],
+                              [Disable textroom plugin])],
+              [],
+              [enable_plugin_textroom=yes])
+
+PKG_CHECK_MODULES([SOFIA],
+                  [sofia-sip-ua],
+                  [],
+                  [
+                    AC_MSG_NOTICE(sofia-sip-ua not found. The sip plugin will not be built.)
+                    enable_plugin_sip=no
+                  ])
+AC_SUBST([SOFIA_CFLAGS])
+AC_SUBST([SOFIA_LIBS])
+
 PKG_CHECK_MODULES([OPUS],
                   [opus],
                   [],
@@ -307,6 +384,8 @@ PKG_CHECK_MODULES([OPUS],
                     AC_MSG_NOTICE(libopus not found. The audiobridge plugin will not be built.)
                     enable_plugin_audiobridge=no
                   ])
+AC_SUBST([OPUS_CFLAGS])
+AC_SUBST([OPUS_LIBS])
 
 PKG_CHECK_MODULES([OGG],
                   [ogg],
@@ -315,6 +394,8 @@ PKG_CHECK_MODULES([OGG],
                     AC_MSG_NOTICE(libogg not found. The voicemail plugin will not be built.)
                     enable_plugin_voicemail=no
                   ])
+AC_SUBST([OGG_CFLAGS])
+AC_SUBST([OGG_LIBS])
 
 AM_CONDITIONAL([ENABLE_PLUGIN_AUDIOBRIDGE], [test "x$enable_plugin_audiobridge" = "xyes"])
 AM_CONDITIONAL([ENABLE_PLUGIN_ECHOTEST], [test "x$enable_plugin_echotest" = "xyes"])
@@ -324,6 +405,7 @@ AM_CONDITIONAL([ENABLE_PLUGIN_STREAMING], [test "x$enable_plugin_streaming" = "x
 AM_CONDITIONAL([ENABLE_PLUGIN_VIDEOCALL], [test "x$enable_plugin_videocall" = "xyes"])
 AM_CONDITIONAL([ENABLE_PLUGIN_VIDEOROOM], [test "x$enable_plugin_videoroom" = "xyes"])
 AM_CONDITIONAL([ENABLE_PLUGIN_VOICEMAIL], [test "x$enable_plugin_voicemail" = "xyes"])
+AM_CONDITIONAL([ENABLE_PLUGIN_TEXTROOM], [test "x$enable_plugin_textroom" = "xyes"])
 
 ##
 # Post-processing
@@ -393,6 +475,12 @@ AM_COND_IF([ENABLE_WEBSOCKETS],
 AM_COND_IF([ENABLE_RABBITMQ],
 	[echo "    RabbitMQ:              yes"],
 	[echo "    RabbitMQ:              no"])
+AM_COND_IF([ENABLE_MQTT],
+	[echo "    MQTT:                  yes"],
+	[echo "    MQTT:                  no"])
+AM_COND_IF([ENABLE_PFUNIX],
+	[echo "    Unix Sockets:          yes"],
+	[echo "    Unix Sockets:          no"])
 echo "Plugins:"
 AM_COND_IF([ENABLE_PLUGIN_ECHOTEST],
 	[echo "    Echo Test:             yes"],
@@ -418,6 +506,9 @@ AM_COND_IF([ENABLE_PLUGIN_VOICEMAIL],
 AM_COND_IF([ENABLE_PLUGIN_RECORDPLAY],
 	[echo "    Record&Play:           yes"],
 	[echo "    Record&Play:           no"])
+AM_COND_IF([ENABLE_PLUGIN_TEXTROOM],
+	[echo "    Text Room:             yes"],
+	[echo "    Text Room:             no"])
 
 echo
 echo "If this configuration is ok for you, do a 'make' to start building Janus. A 'make install' will install Janus and its plugins to the specified prefix. Finally, a 'make configs' will install some sample configuration files too (something you'll only want to do the first time, though)."

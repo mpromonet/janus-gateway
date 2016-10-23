@@ -22,7 +22,6 @@ To install it, you'll need to satisfy the following dependencies:
 * [libnice](http://nice.freedesktop.org/wiki/)
 * [OpenSSL](http://www.openssl.org/) (at least v1.0.1e)
 * [libsrtp](https://github.com/cisco/libsrtp) (at least v1.5 suggested)
-* [Sofia-SIP](http://sofia-sip.sourceforge.net/)
 * [usrsctp](https://github.com/sctplab/usrsctp) (only needed if you
 are interested in Data Channels)
 * [libmicrohttpd](http://www.gnu.org/software/libmicrohttpd/) (only
@@ -33,9 +32,12 @@ you are interested in WebSockets support for the Janus API)
 WebSockets and/or BoringSSL support, as they make use of it)
 * [rabbitmq-c](https://github.com/alanxz/rabbitmq-c) (only needed if
 you are interested in RabbitMQ support for the Janus API)
+* [paho.mqtt.c](https://eclipse.org/paho/clients/c) (only needed if
+you are interested in MQTT support for the Janus API)
 
 A couple of plugins depend on a few more libraries:
 
+* [Sofia-SIP](http://sofia-sip.sourceforge.net/) (only needed for the SIP plugin)
 * [libopus](http://opus-codec.org/) (only needed for the bridge plugin)
 * [libogg](http://xiph.org/ogg/) (only needed for the voicemail plugin)
 
@@ -80,15 +82,12 @@ is quite straightforward:
 * *Note:* you may need to pass --libdir=/usr/lib64 to the configure
 script if you're installing on a x86_64 distribution.
 
-If you want to make use of BoringSSL instead of OpenSSL for any reason
-(read [here](https://github.com/meetecho/janus-gateway/issues/136) for
-some background on this), you'll have to manually install a specific
-version of the library to a specific location. Use the following steps:
+If you want to make use of BoringSSL instead of OpenSSL (e.g., because
+you want to take advantage of `--enable-dtls-settimeout`), you'll have
+to manually install it to a specific location. Use the following steps:
 
 	git clone https://boringssl.googlesource.com/boringssl
 	cd boringssl
-	# We need a specific revision
-	git checkout 12fe1b25ead258858309d22ffa9e1f9a316358d7
 	# Don't barf on errors
 	sed -i s/" -Werror"//g CMakeLists.txt
 	# Build
@@ -142,6 +141,19 @@ HTTP REST API, you'll have to install it manually:
 the first line with this:
 
 	git clone https://github.com/warmcat/libwebsockets.git
+
+The same applies for Eclipse Paho MQTT C client library, which is needed
+for the optional MQTT support. If you're interested in integrating MQTT
+queues as an alternative (or replacement) to HTTP and/or WebSockets
+to control Janus, you can install the latest version with the
+following steps:
+
+	git clone https://github.com/eclipse/paho.mqtt.c.git
+	cd paho.mqtt.c
+	make && sudo make install
+
+* *Note:* you may want to set up a different install path for the library,
+to achieve that, replace the last command by 'sudo prefix=/usr make install'.
 
 Finally, the same can be said for rabbitmq-c as well, which is needed
 for the optional RabbitMQ support. In fact, several different versions
@@ -206,7 +218,7 @@ meanwhile.
 
 If you're not interested in Data Channels, WebSockets and/or RabbitMQ
 (or you don't care about either of them) you can disable them when
-configuring: 
+configuring:
 
 	./configure --disable-websockets --disable-data-channels --disable-rabbitmq
 
@@ -232,7 +244,7 @@ or on the command line:
 
 	<installdir>/bin/janus --help
 	
-	janus 0.1.0
+	janus 0.2.1
 
 	Usage: janus [OPTIONS]...
 
@@ -246,9 +258,9 @@ or on the command line:
 	-P, --plugins-folder=path     Plugins folder (default=./plugins)
 	-C, --config=filename         Configuration file to use
 	-F, --configs-folder=path     Configuration files folder (default=./conf)
-	-c, --cert-pem=filename       HTTPS/DTLS certificate
-	-k, --cert-key=filename       HTTPS/DTLS certificate key
-	-S, --stun-server=filename    STUN server(:port) to use, if needed (e.g., 
+	-c, --cert-pem=filename       DTLS certificate
+	-k, --cert-key=filename       DTLS certificate key
+	-S, --stun-server=filename    STUN server(:port) to use, if needed (e.g.,
 								  gateway behind NAT, default=none)
 	-1, --nat-1-1=ip              Public IP to put in all host candidates,
                                   assuming a 1:1 NAT is in place (e.g., Amazon
@@ -257,36 +269,36 @@ or on the command line:
                                   use for ICE gathering; partial strings are
                                   supported (e.g., eth0 or eno1,wlan0,
                                   default=none)
-	-X, --ice-ignore-list=list    Comma-separated list of interfaces or IP 
-                                  addresses to ignore for ICE gathering; 
-                                  partial strings are supported (e.g., 
-                                  vmnet8,192.168.0.1,10.0.0.1 or 
+	-X, --ice-ignore-list=list    Comma-separated list of interfaces or IP
+                                  addresses to ignore for ICE gathering;
+                                  partial strings are supported (e.g.,
+                                  vmnet8,192.168.0.1,10.0.0.1 or
                                   vmnet,192.168., default=vmnet)
-	-6, --ipv6-candidates         Whether to enable IPv6 candidates or not 
+	-6, --ipv6-candidates         Whether to enable IPv6 candidates or not
                                   (experimental)  (default=off)
-	-l, --libnice-debug           Whether to enable libnice debugging or not  
+	-l, --libnice-debug           Whether to enable libnice debugging or not
                                   (default=off)
-	-I, --ice-lite                Whether to enable the ICE Lite mode or not  
+	-I, --ice-lite                Whether to enable the ICE Lite mode or not
                                   (default=off)
 	-T, --ice-tcp                 Whether to enable ICE-TCP or not (warning: only
                                   works with ICE Lite)
                                   (default=off)
-	-U, --bundle                  Whether to force BUNDLE or not (whether audio, 
-                                  video and data will always be bundled)  
+	-U, --bundle                  Whether to force BUNDLE or not (whether audio,
+                                  video and data will always be bundled)
                                   (default=off)
-	-u, --rtcp-mux                Whether to force rtcp-mux or not (whether RTP 
+	-u, --rtcp-mux                Whether to force rtcp-mux or not (whether RTP
                                   and RTCP will always be muxed)  (default=off)
-	-q, --max-nack-queue=number   Maximum size of the NACK queue per user for 
+	-q, --max-nack-queue=number   Maximum size of the NACK queue per user for
                                   retransmissions
 	-r, --rtp-port-range=min-max  Port range to use for RTP/RTCP (only available
 								  if the installed libnice supports it)
-	-d, --debug-level=1-7         Debug/logging level (0=disable debugging, 
+	-d, --debug-level=1-7         Debug/logging level (0=disable debugging,
                                   7=maximum debug level; default=4)
 	-D, --debug-timestamps        Enable debug/logging timestamps  (default=off)
 	-o, --disable-colors          Disable color in the logging  (default=off)
-	-a, --apisecret=randomstring  API secret all requests need to pass in order 
-                                  to be accepted by Janus (useful when wrapping 
-                                  Janus API requests in a server, none by 
+	-a, --apisecret=randomstring  API secret all requests need to pass in order
+                                  to be accepted by Janus (useful when wrapping
+                                  Janus API requests in a server, none by
                                   default)
 	-A, --token-auth              Enable token-based authentication for all
                                   requests  (default=off)
@@ -312,8 +324,8 @@ you to more easily customize rules in any frontend you may have (e.g.,
 Apache in front of your services). Please notice that the path configuration
 is not provided for WebSockets, instead, as it is not needed there. The
 RabbitMQ module, if compiled, is disabled by default, so you'll have
-to enable it manually if interested in it. 
- 
+to enable it manually if interested in it.
+
 To test whether it's working correctly, you can use the demos provided
 with this package in the ```html``` folder: these are exactly the same demos
 available online on the [project website](http://janus.conf.meetecho.com/).

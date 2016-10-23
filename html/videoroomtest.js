@@ -122,6 +122,13 @@ $(document).ready(function() {
 										$.unblockUI();
 									}
 								},
+								mediaState: function(medium, on) {
+									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium);
+								},
+								webrtcState: function(on) {
+									Janus.log("Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
+									$("#videolocal").parent().parent().unblock();
+								},
 								onmessage: function(msg, jsep) {
 									Janus.debug(" ::: Got a message (publisher) :::");
 									Janus.debug(JSON.stringify(msg));
@@ -232,8 +239,16 @@ $(document).ready(function() {
 										$('#unpublish').click(unpublishOwnFeed);
 									}
 									$('#publisher').removeClass('hide').html(myusername).show();
-									attachMediaStream($('#myvideo').get(0), stream);
+									Janus.attachMediaStream($('#myvideo').get(0), stream);
 									$("#myvideo").get(0).muted = "muted";
+									$("#videolocal").parent().parent().block({
+										message: '<b>Publishing...</b>',
+										css: {
+											border: 'none',
+											backgroundColor: 'transparent',
+											color: 'white'
+										}
+									});
 									var videoTracks = stream.getVideoTracks();
 									if(videoTracks === null || videoTracks === undefined || videoTracks.length === 0) {
 										// No webcam
@@ -253,6 +268,7 @@ $(document).ready(function() {
 									mystream = null;
 									$('#videolocal').html('<button id="publish" class="btn btn-primary">Publish</button>');
 									$('#publish').click(function() { publishOwnFeed(true); });
+									$("#videolocal").parent().parent().unblock();
 								}
 							});
 					},
@@ -424,6 +440,9 @@ function newRemoteFeed(id, display) {
 						});
 				}
 			},
+			webrtcState: function(on) {
+				Janus.log("Janus says this WebRTC PeerConnection (feed #" + remoteFeed.rfindex + ") is " + (on ? "up" : "down") + " now");
+			},
 			onlocalstream: function(stream) {
 				// The subscriber stream is recvonly, we don't expect anything here
 			},
@@ -447,7 +466,7 @@ function newRemoteFeed(id, display) {
 					var width = this.videoWidth;
 					var height = this.videoHeight;
 					$('#curres'+remoteFeed.rfindex).removeClass('hide').text(width+'x'+height).show();
-					if(webrtcDetectedBrowser == "firefox") {
+					if(adapter.browserDetails.browser === "firefox") {
 						// Firefox Stable has a bug: width and height are not immediately available after a playing
 						setTimeout(function() {
 							var width = $("#remotevideo"+remoteFeed.rfindex).get(0).videoWidth;
@@ -456,7 +475,7 @@ function newRemoteFeed(id, display) {
 						}, 2000);
 					}
 				});
-				attachMediaStream($('#remotevideo'+remoteFeed.rfindex).get(0), stream);
+				Janus.attachMediaStream($('#remotevideo'+remoteFeed.rfindex).get(0), stream);
 				var videoTracks = stream.getVideoTracks();
 				if(videoTracks === null || videoTracks === undefined || videoTracks.length === 0 || videoTracks[0].muted) {
 					// No remote video
@@ -467,7 +486,7 @@ function newRemoteFeed(id, display) {
 							'<span class="no-video-text" style="font-size: 16px;">No remote video available</span>' +
 						'</div>');
 				}
-				if(webrtcDetectedBrowser == "chrome" || webrtcDetectedBrowser == "firefox") {
+				if(adapter.browserDetails.browser === "chrome" || adapter.browserDetails.browser === "firefox") {
 					$('#curbitrate'+remoteFeed.rfindex).removeClass('hide').show();
 					bitrateTimer[remoteFeed.rfindex] = setInterval(function() {
 						// Display updated bitrate, if supported
