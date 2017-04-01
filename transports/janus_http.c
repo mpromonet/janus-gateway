@@ -40,6 +40,7 @@
 #include "../apierror.h"
 #include "../config.h"
 #include "../mutex.h"
+#include "../ip-utils.h"
 #include "../utils.h"
 
 
@@ -103,6 +104,7 @@ static gint initialized = 0, stopping = 0;
 static janus_transport_callbacks *gateway = NULL;
 static gboolean http_janus_api_enabled = FALSE;
 static gboolean http_admin_api_enabled = FALSE;
+static gboolean notify_events = TRUE;
 
 /* JSON serialization options */
 static size_t json_format = JSON_INDENT(3) | JSON_PRESERVE_ORDER;
@@ -202,6 +204,27 @@ static gboolean janus_http_is_allowed(const char *ip, gboolean admin) {
 	}
 	janus_mutex_unlock(&access_list_mutex);
 	return FALSE;
+}
+
+/* Helper method to get the port from a struct sockaddr */
+static uint16_t janus_http_sockaddr_to_port(struct sockaddr *address) {
+	if(address == NULL)
+		return 0;
+	struct sockaddr_in *sin = NULL;
+	struct sockaddr_in6 *sin6 = NULL;
+
+	switch(address->sa_family) {
+		case AF_INET:
+			sin = (struct sockaddr_in *)address;
+			return ntohs(sin->sin_port);
+		case AF_INET6:
+			sin6 = (struct sockaddr_in6 *)address;
+			return ntohs(sin6->sin6_port);
+		default:
+			/* Unknown family */
+			break;
+	}
+	return 0;
 }
 
 /* Random string helper (for transactions) */
@@ -385,7 +408,7 @@ static struct MHD_Daemon *janus_http_create_daemon(gboolean admin, char *path,
 			fseek(pem, 0L, SEEK_END);
 			size_t size = ftell(pem);
 			fseek(pem, 0L, SEEK_SET);
-			cert_pem_bytes = g_malloc0(size);
+			cert_pem_bytes = g_malloc0(size+1);
 			char *index = cert_pem_bytes;
 			int read = 0, tot = size;
 			while((read = fread(index, sizeof(char), tot, pem)) > 0) {
@@ -393,6 +416,7 @@ static struct MHD_Daemon *janus_http_create_daemon(gboolean admin, char *path,
 				index += read;
 			}
 			fclose(pem);
+			cert_pem_bytes[size] = '\0';
 		}
 		FILE *key = fopen(server_key, "rb");
 		if(key) {
@@ -570,6 +594,14 @@ int janus_http_init(janus_transport_callbacks *callback, const char *config_path
 				JANUS_LOG(LOG_WARN, "Unsupported JSON format option '%s', using default (indented)\n", item->value);
 				json_format = JSON_INDENT(3) | JSON_PRESERVE_ORDER;
 			}
+		}
+
+		/* Check if we need to send events to handlers */
+		janus_config_item *events = janus_config_get_item_drilldown(config, "general", "events");
+		if(events != NULL && events->value != NULL)
+			notify_events = janus_is_true(events->value);
+		if(!notify_events && callback->events_is_enabled()) {
+			JANUS_LOG(LOG_WARN, "Notification of events to handlers disabled for %s\n", JANUS_REST_NAME);
 		}
 
 		/* Check the base paths */
@@ -793,7 +825,7 @@ int janus_http_init(janus_transport_callbacks *callback, const char *config_path
 	janus_config_destroy(config);
 	config = NULL;
 	if(!ws && !sws && !admin_ws && !admin_sws) {
-		JANUS_LOG(LOG_FATAL, "No HTTP/HTTPS server started, giving up...\n"); 
+		JANUS_LOG(LOG_WARN, "No HTTP/HTTPS server started, giving up...\n");
 		return -1;	/* No point in keeping the plugin loaded */
 	}
 	http_janus_api_enabled = ws || sws;
@@ -993,28 +1025,40 @@ void janus_http_session_over(void *transport, guint64 session_id, gboolean timeo
 
 /* Connection notifiers */
 int janus_http_client_connect(void *cls, const struct sockaddr *addr, socklen_t addrlen) {
-	char *ip = janus_address_to_ip((struct sockaddr *)addr);
+	janus_network_address naddr;
+	janus_network_address_string_buffer naddr_buf;
+	if(janus_network_address_from_sockaddr((struct sockaddr *)addr, &naddr) != 0 ||
+			janus_network_address_to_string_buffer(&naddr, &naddr_buf) != 0) {
+		JANUS_LOG(LOG_WARN, "Error trying to resolve connection address...\n");
+		/* Should this be MHD_NO instead? */
+		return MHD_YES;
+	}
+	const char *ip = janus_network_address_string_from_buffer(&naddr_buf);
 	JANUS_LOG(LOG_HUGE, "New connection on REST API: %s\n", ip);
 	/* Any access limitation based on this IP address? */
 	if(!janus_http_is_allowed(ip, FALSE)) {
 		JANUS_LOG(LOG_ERR, "IP %s is unauthorized to connect to the Janus API interface\n", ip);
-		g_free(ip);
 		return MHD_NO;
 	}
-	g_free(ip);
 	return MHD_YES;
 }
 
 int janus_http_admin_client_connect(void *cls, const struct sockaddr *addr, socklen_t addrlen) {
-	char *ip = janus_address_to_ip((struct sockaddr *)addr);
+	janus_network_address naddr;
+	janus_network_address_string_buffer naddr_buf;
+	if(janus_network_address_from_sockaddr((struct sockaddr *)addr, &naddr) != 0 ||
+			janus_network_address_to_string_buffer(&naddr, &naddr_buf) != 0) {
+		JANUS_LOG(LOG_WARN, "Error trying to resolve Admin connection address...\n");
+		/* Should this be MHD_NO instead? */
+		return MHD_YES;
+	}
+	const char *ip = janus_network_address_string_from_buffer(&naddr_buf);
 	JANUS_LOG(LOG_HUGE, "New connection on admin/monitor: %s\n", ip);
 	/* Any access limitation based on this IP address? */
 	if(!janus_http_is_allowed(ip, TRUE)) {
 		JANUS_LOG(LOG_ERR, "IP %s is unauthorized to connect to the admin/monitor interface\n", ip);
-		g_free(ip);
 		return MHD_NO;
 	}
-	g_free(ip);
 	return MHD_YES;
 }
 
@@ -1060,6 +1104,25 @@ int janus_http_handler(void *cls, struct MHD_Connection *connection, const char 
 		*ptr = msg;
 		MHD_get_connection_values(connection, MHD_HEADER_KIND, &janus_http_headers, msg);
 		ret = MHD_YES;
+		/* Notify handlers about this new transport instance */
+		if(notify_events && gateway->events_is_enabled()) {
+			json_t *info = json_object();
+			json_object_set_new(info, "event", json_string("request"));
+			json_object_set_new(info, "admin_api", json_false());
+			const union MHD_ConnectionInfo *conninfo = MHD_get_connection_info(connection, MHD_CONNECTION_INFO_CLIENT_ADDRESS);
+			if(conninfo != NULL) {
+				janus_network_address addr;
+				janus_network_address_string_buffer addr_buf;
+				if(janus_network_address_from_sockaddr((struct sockaddr *)conninfo->client_addr, &addr) == 0 &&
+						janus_network_address_to_string_buffer(&addr, &addr_buf) == 0) {
+					const char *ip = janus_network_address_string_from_buffer(&addr_buf);
+					json_object_set_new(info, "ip", json_string(ip));
+				}
+				uint16_t port = janus_http_sockaddr_to_port((struct sockaddr *)conninfo->client_addr);
+				json_object_set_new(info, "port", json_integer(port));
+			}
+			gateway->notify_event(&janus_http_transport, msg, info);
+		}
 	} else {
 		JANUS_LOG(LOG_DBG, "Processing HTTP %s request on %s...\n", method, url);
 	}
@@ -1441,6 +1504,25 @@ int janus_http_admin_handler(void *cls, struct MHD_Connection *connection, const
 		*ptr = msg;
 		MHD_get_connection_values(connection, MHD_HEADER_KIND, &janus_http_headers, msg);
 		ret = MHD_YES;
+		/* Notify handlers about this new transport instance */
+		if(notify_events && gateway->events_is_enabled()) {
+			json_t *info = json_object();
+			json_object_set_new(info, "event", json_string("request"));
+			json_object_set_new(info, "admin_api", json_true());
+			const union MHD_ConnectionInfo *conninfo = MHD_get_connection_info(connection, MHD_CONNECTION_INFO_CLIENT_ADDRESS);
+			if(conninfo != NULL) {
+				janus_network_address addr;
+				janus_network_address_string_buffer addr_buf;
+				if(janus_network_address_from_sockaddr((struct sockaddr *)conninfo->client_addr, &addr) == 0 &&
+						janus_network_address_to_string_buffer(&addr, &addr_buf) == 0) {
+					const char *ip = janus_network_address_string_from_buffer(&addr_buf);
+					json_object_set_new(info, "ip", json_string(ip));
+				}
+				uint16_t port = janus_http_sockaddr_to_port((struct sockaddr *)conninfo->client_addr);
+				json_object_set_new(info, "port", json_integer(port));
+			}
+			gateway->notify_event(&janus_http_transport, msg, info);
+		}
 	}
 	/* Parse request */
 	if (strcasecmp(method, "GET") && strcasecmp(method, "POST") && strcasecmp(method, "OPTIONS")) {
@@ -1744,6 +1826,8 @@ int janus_http_notifier(janus_http_msg *msg, int max_events) {
 		g_usleep(100000);
 		end = janus_get_monotonic_time();
 	}
+	if((max_events == 1 && event == NULL) || (max_events > 1 && list == NULL))
+		found = FALSE;
 	if(!found) {
 		JANUS_LOG(LOG_VERB, "Long poll time out for session %"SCNu64"...\n", session_id);
 		/* Turn this into a "keepalive" response */
@@ -1763,7 +1847,7 @@ int janus_http_notifier(janus_http_msg *msg, int max_events) {
 	char *payload_text = json_dumps(max_events == 1 ? event : list, json_format);
 	json_decref(max_events == 1 ? event : list);
 	/* Finish the request by sending the response */
-	JANUS_LOG(LOG_VERB, "We have a message to serve...\n\t%s\n", payload_text);
+	JANUS_LOG(LOG_HUGE, "We have a message to serve...\n\t%s\n", payload_text);
 	/* Send event */
 	ret = janus_http_return_success(msg, payload_text);
 	return ret;
@@ -1772,7 +1856,8 @@ int janus_http_notifier(janus_http_msg *msg, int max_events) {
 /* Helper to quickly send a success response */
 int janus_http_return_success(janus_http_msg *msg, char *payload) {
 	if(!msg || !msg->connection) {
-		g_free(payload);
+		if(payload)
+			free(payload);
 		return MHD_NO;
 	}
 	struct MHD_Response *response = MHD_create_response_from_buffer(

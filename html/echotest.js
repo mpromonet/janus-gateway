@@ -50,6 +50,8 @@ else
 
 var janus = null;
 var echotest = null;
+var opaqueId = "echotest-"+Janus.randomString(12);
+
 var started = false;
 var bitrateTimer = null;
 var spinner = null;
@@ -89,6 +91,7 @@ $(document).ready(function() {
 						janus.attach(
 							{
 								plugin: "janus.plugin.echotest",
+								opaqueId: opaqueId,
 								success: function(pluginHandle) {
 									$('#details').remove();
 									echotest = pluginHandle;
@@ -142,12 +145,19 @@ $(document).ready(function() {
 										$.unblockUI();
 									}
 								},
+								iceState: function(state) {
+									Janus.log("ICE state changed to " + state);
+								},
 								mediaState: function(medium, on) {
 									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium);
 								},
 								webrtcState: function(on) {
 									Janus.log("Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
 									$("#videoleft").parent().unblock();
+								},
+								slowLink: function(uplink, nacks) {
+									Janus.warn("Janus reports problems " + (uplink ? "sending" : "receiving") +
+										" packets on this PeerConnection (" + nacks + " NACKs/s " + (uplink ? "received" : "sent") + ")");
 								},
 								onmessage: function(msg, jsep) {
 									Janus.debug(" ::: Got a message :::");

@@ -28,6 +28,10 @@
 
 #include "transport.h"
 
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <ifaddrs.h>
+
 #include <libwebsockets.h>
 
 #include "../debug.h"
@@ -97,6 +101,7 @@ static gint initialized = 0, stopping = 0;
 static janus_transport_callbacks *gateway = NULL;
 static gboolean wss_janus_api_enabled = FALSE;
 static gboolean wss_admin_api_enabled = FALSE;
+static gboolean notify_events = TRUE;
 
 /* JSON serialization options */
 static size_t json_format = JSON_INDENT(3) | JSON_PRESERVE_ORDER;
@@ -293,6 +298,31 @@ static const char *janus_websockets_reason_string(enum libwebsocket_callback_rea
 	return NULL;
 }
 
+/* Helper method to return the interface associated with a local IP address */
+static char *janus_websockets_get_interface_name(const char *ip) {
+	struct ifaddrs *addrs = NULL, *iap = NULL;
+	getifaddrs(&addrs);
+	for(iap = addrs; iap != NULL; iap = iap->ifa_next) {
+		if(iap->ifa_addr && (iap->ifa_flags & IFF_UP)) {
+			if(iap->ifa_addr->sa_family == AF_INET) {
+				struct sockaddr_in *sa = (struct sockaddr_in *)(iap->ifa_addr);
+				char buffer[16];
+				inet_ntop(iap->ifa_addr->sa_family, (void *)&(sa->sin_addr), buffer, sizeof(buffer));
+				if(!strcmp(ip, buffer))
+					return g_strdup(iap->ifa_name);
+			} else if(iap->ifa_addr->sa_family == AF_INET6) {
+				struct sockaddr_in6 *sa = (struct sockaddr_in6 *)(iap->ifa_addr);
+				char buffer[48];
+				inet_ntop(iap->ifa_addr->sa_family, (void *)&(sa->sin6_addr), buffer, sizeof(buffer));
+				if(!strcmp(ip, buffer))
+					return g_strdup(iap->ifa_name);
+			}
+		}
+	}
+	freeifaddrs(addrs);
+	return NULL;
+}
+
 /* WebSockets ACL list for both Janus and Admin API */
 GList *janus_websockets_access_list = NULL, *janus_websockets_admin_access_list = NULL;
 janus_mutex access_list_mutex;
@@ -381,6 +411,14 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 			}
 		}
 
+		/* Check if we need to send events to handlers */
+		janus_config_item *events = janus_config_get_item_drilldown(config, "general", "events");
+		if(events != NULL && events->value != NULL)
+			notify_events = janus_is_true(events->value);
+		if(!notify_events && callback->events_is_enabled()) {
+			JANUS_LOG(LOG_WARN, "Notification of events to handlers disabled for %s\n", JANUS_WEBSOCKETS_NAME);
+		}
+
 		item = janus_config_get_item_drilldown(config, "general", "ws_logging");
 		if(item && item->value) {
 			ws_log_level = atoi(item->value);
@@ -445,8 +483,14 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				interface = (char *)item->value;
 			char *ip = NULL;
 			item = janus_config_get_item_drilldown(config, "general", "ws_ip");
-			if(item && item->value)
+			if(item && item->value) {
 				ip = (char *)item->value;
+				char *iface = janus_websockets_get_interface_name(ip);
+				if(iface == NULL) {
+					JANUS_LOG(LOG_WARN, "No interface associated with %s? Falling back to no interface...\n", ip);
+				}
+				ip = iface;
+			}
 			/* Prepare context */
 			struct lws_context_creation_info info;
 			memset(&info, 0, sizeof info);
@@ -474,6 +518,7 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 			} else {
 				JANUS_LOG(LOG_INFO, "WebSockets server started (port %d)...\n", wsport);
 			}
+			g_free(ip);
 		}
 		item = janus_config_get_item_drilldown(config, "general", "wss");
 		if(!item || !item->value || !janus_is_true(item->value)) {
@@ -489,8 +534,14 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				interface = (char *)item->value;
 			char *ip = NULL;
 			item = janus_config_get_item_drilldown(config, "general", "wss_ip");
-			if(item && item->value)
+			if(item && item->value) {
 				ip = (char *)item->value;
+				char *iface = janus_websockets_get_interface_name(ip);
+				if(iface == NULL) {
+					JANUS_LOG(LOG_WARN, "No interface associated with %s? Falling back to no interface...\n", ip);
+				}
+				ip = iface;
+			}
 			item = janus_config_get_item_drilldown(config, "certificates", "cert_pem");
 			if(!item || !item->value) {
 				JANUS_LOG(LOG_FATAL, "Missing certificate/key path\n");
@@ -516,7 +567,11 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				info.ssl_private_key_filepath = server_key;
 				info.gid = -1;
 				info.uid = -1;
+#if LWS_LIBRARY_VERSION_MAJOR >= 2
+				info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+#else
 				info.options = 0;
+#endif
 				/* Create the secure WebSocket context */
 #ifdef HAVE_LIBWEBSOCKETS_NEWAPI
 				swss = lws_create_context(&info);
@@ -528,6 +583,7 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				} else {
 					JANUS_LOG(LOG_INFO, "Secure WebSockets server started (port %d)...\n", wsport);
 				}
+				g_free(ip);
 			}
 		}
 		/* Do the same for the Admin API, if enabled */
@@ -545,8 +601,14 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				interface = (char *)item->value;
 			char *ip = NULL;
 			item = janus_config_get_item_drilldown(config, "admin", "admin_ws_ip");
-			if(item && item->value)
+			if(item && item->value) {
 				ip = (char *)item->value;
+				char *iface = janus_websockets_get_interface_name(ip);
+				if(iface == NULL) {
+					JANUS_LOG(LOG_WARN, "No interface associated with %s? Falling back to no interface...\n", ip);
+				}
+				ip = iface;
+			}
 			/* Prepare context */
 			struct lws_context_creation_info info;
 			memset(&info, 0, sizeof info);
@@ -574,6 +636,7 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 			} else {
 				JANUS_LOG(LOG_INFO, "Admin WebSockets server started (port %d)...\n", wsport);
 			}
+			g_free(ip);
 		}
 		item = janus_config_get_item_drilldown(config, "admin", "admin_wss");
 		if(!item || !item->value || !janus_is_true(item->value)) {
@@ -589,8 +652,14 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				interface = (char *)item->value;
 			char *ip = NULL;
 			item = janus_config_get_item_drilldown(config, "admin", "admin_wss_ip");
-			if(item && item->value)
+			if(item && item->value) {
 				ip = (char *)item->value;
+				char *iface = janus_websockets_get_interface_name(ip);
+				if(iface == NULL) {
+					JANUS_LOG(LOG_WARN, "No interface associated with %s? Falling back to no interface...\n", ip);
+				}
+				ip = iface;
+			}
 			item = janus_config_get_item_drilldown(config, "certificates", "cert_pem");
 			if(!item || !item->value) {
 				JANUS_LOG(LOG_FATAL, "Missing certificate/key path\n");
@@ -616,7 +685,11 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				info.ssl_private_key_filepath = server_key;
 				info.gid = -1;
 				info.uid = -1;
+#if LWS_LIBRARY_VERSION_MAJOR >= 2
+				info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+#else
 				info.options = 0;
+#endif
 				/* Create the secure WebSocket context */
 #ifdef HAVE_LIBWEBSOCKETS_NEWAPI
 				admin_swss = lws_create_context(&info);
@@ -628,13 +701,14 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				} else {
 					JANUS_LOG(LOG_INFO, "Secure Admin WebSockets server started (port %d)...\n", wsport);
 				}
+				g_free(ip);
 			}
 		}
 	}
 	janus_config_destroy(config);
 	config = NULL;
 	if(!wss && !swss && !admin_wss && !admin_swss) {
-		JANUS_LOG(LOG_FATAL, "No WebSockets server started, giving up...\n");
+		JANUS_LOG(LOG_WARN, "No WebSockets server started, giving up...\n");
 		return -1;	/* No point in keeping the plugin loaded */
 	}
 	wss_janus_api_enabled = wss || swss;
@@ -753,6 +827,12 @@ static void janus_websockets_destroy_client(
 		const char *log_prefix) {
 	if(!ws_client || ws_client->destroy)
 		return;
+	/* Notify handlers about this transport being gone */
+	if(notify_events && gateway->events_is_enabled()) {
+		json_t *info = json_object();
+		json_object_set_new(info, "event", json_string("disconnected"));
+		gateway->notify_event(&janus_websockets_transport, ws_client, info);
+	}
 	/* Notify core */
 	gateway->transport_gone(&janus_websockets_transport, ws_client);
 	/* Mark the session as closed */
@@ -827,7 +907,7 @@ int janus_websockets_send_message(void *transport, void *request_id, gboolean ad
 	if(message == NULL)
 		return -1;
 	if(transport == NULL) {
-		g_free(message);
+		json_decref(message);
 		return -1;
 	}
 	/* Make sure this is not related to a closed /freed WebSocket session */
@@ -838,7 +918,7 @@ int janus_websockets_send_message(void *transport, void *request_id, gboolean ad
 #else
 	if(g_list_find(old_wss, client) != NULL || !client->context || !client->wsi) {
 #endif
-		g_free(message);
+		json_decref(message);
 		message = NULL;
 		transport = NULL;
 		janus_mutex_unlock(&old_wss_mutex);
@@ -1051,10 +1131,18 @@ static int janus_websockets_common_callback(
 			libwebsocket_callback_on_writable(this, wsi);
 #endif
 			JANUS_LOG(LOG_VERB, "[%s-%p]   -- Ready to be used!\n", log_prefix, wsi);
+			/* Notify handlers about this new transport */
+			if(notify_events && gateway->events_is_enabled()) {
+				json_t *info = json_object();
+				json_object_set_new(info, "event", json_string("connected"));
+				json_object_set_new(info, "admin_api", admin ? json_true() : json_false());
+				json_object_set_new(info, "ip", json_string(ip));
+				gateway->notify_event(&janus_websockets_transport, ws_client, info);
+			}
 			return 0;
 		}
 		case LWS_CALLBACK_RECEIVE: {
-			JANUS_LOG(LOG_VERB, "[%s-%p] Got %zu bytes:\n", log_prefix, wsi, len);
+			JANUS_LOG(LOG_HUGE, "[%s-%p] Got %zu bytes:\n", log_prefix, wsi, len);
 #ifdef HAVE_LIBWEBSOCKETS_NEWAPI
 			if(ws_client == NULL || ws_client->wsi == NULL) {
 #else
@@ -1070,14 +1158,14 @@ static int janus_websockets_common_callback(
 			const size_t remaining = libwebsockets_remaining_packet_payload(wsi);
 #endif
 			if(ws_client->incoming == NULL) {
-				JANUS_LOG(LOG_VERB, "[%s-%p] First fragment: %zu bytes, %zu remaining\n", log_prefix, wsi, len, remaining);
+				JANUS_LOG(LOG_HUGE, "[%s-%p] First fragment: %zu bytes, %zu remaining\n", log_prefix, wsi, len, remaining);
 				ws_client->incoming = g_malloc0(len+1);
 				memcpy(ws_client->incoming, in, len);
 				ws_client->incoming[len] = '\0';
 				JANUS_LOG(LOG_HUGE, "%s\n", ws_client->incoming);
 			} else {
 				size_t offset = strlen(ws_client->incoming);
-				JANUS_LOG(LOG_VERB, "[%s-%p] Appending fragment: offset %zu, %zu bytes, %zu remaining\n", log_prefix, wsi, offset, len, remaining);
+				JANUS_LOG(LOG_HUGE, "[%s-%p] Appending fragment: offset %zu, %zu bytes, %zu remaining\n", log_prefix, wsi, offset, len, remaining);
 				ws_client->incoming = g_realloc(ws_client->incoming, offset+len+1);
 				memcpy(ws_client->incoming+offset, in, len);
 				ws_client->incoming[offset+len] = '\0';
@@ -1089,10 +1177,10 @@ static int janus_websockets_common_callback(
 			if(remaining > 0 || !libwebsocket_is_final_fragment(wsi)) {
 #endif
 				/* Still waiting for some more fragments */
-				JANUS_LOG(LOG_VERB, "[%s-%p] Waiting for more fragments\n", log_prefix, wsi);
+				JANUS_LOG(LOG_HUGE, "[%s-%p] Waiting for more fragments\n", log_prefix, wsi);
 				return 0;
 			}
-			JANUS_LOG(LOG_VERB, "[%s-%p] Done, parsing message: %zu bytes\n", log_prefix, wsi, strlen(ws_client->incoming));
+			JANUS_LOG(LOG_HUGE, "[%s-%p] Done, parsing message: %zu bytes\n", log_prefix, wsi, strlen(ws_client->incoming));
 			/* If we got here, the message is complete: parse the JSON payload */
 			json_error_t error;
 			json_t *root = json_loads(ws_client->incoming, 0, &error);
@@ -1116,14 +1204,14 @@ static int janus_websockets_common_callback(
 				/* Check if we have a pending/partial write to complete first */
 				if(ws_client->buffer && ws_client->bufpending > 0 && ws_client->bufoffset > 0
 						&& !ws_client->destroy && !g_atomic_int_get(&stopping)) {
-					JANUS_LOG(LOG_VERB, "[%s-%p] Completing pending WebSocket write (still need to write last %d bytes)...\n",
+					JANUS_LOG(LOG_HUGE, "[%s-%p] Completing pending WebSocket write (still need to write last %d bytes)...\n",
 						log_prefix, wsi, ws_client->bufpending);
 #ifdef HAVE_LIBWEBSOCKETS_NEWAPI
 					int sent = lws_write(wsi, ws_client->buffer + ws_client->bufoffset, ws_client->bufpending, LWS_WRITE_TEXT);
 #else
 					int sent = libwebsocket_write(wsi, ws_client->buffer + ws_client->bufoffset, ws_client->bufpending, LWS_WRITE_TEXT);
 #endif
-					JANUS_LOG(LOG_VERB, "[%s-%p]   -- Sent %d/%d bytes\n", log_prefix, wsi, sent, ws_client->bufpending);
+					JANUS_LOG(LOG_HUGE, "[%s-%p]   -- Sent %d/%d bytes\n", log_prefix, wsi, sent, ws_client->bufpending);
 					if(sent > -1 && sent < ws_client->bufpending) {
 						/* We still couldn't send everything that was left, we'll try and complete this in the next round */
 						ws_client->bufpending -= sent;
@@ -1149,32 +1237,32 @@ static int janus_websockets_common_callback(
 					int buflen = LWS_SEND_BUFFER_PRE_PADDING + strlen(response) + LWS_SEND_BUFFER_POST_PADDING;
 					if(ws_client->buffer == NULL) {
 						/* Let's allocate a shared buffer */
-						JANUS_LOG(LOG_VERB, "[%s-%p] Allocating %d bytes (response is %zu bytes)\n", log_prefix, wsi, buflen, strlen(response));
+						JANUS_LOG(LOG_HUGE, "[%s-%p] Allocating %d bytes (response is %zu bytes)\n", log_prefix, wsi, buflen, strlen(response));
 						ws_client->buflen = buflen;
 						ws_client->buffer = g_malloc0(buflen);
 					} else if(buflen > ws_client->buflen) {
 						/* We need a larger shared buffer */
-						JANUS_LOG(LOG_VERB, "[%s-%p] Re-allocating to %d bytes (was %d, response is %zu bytes)\n", log_prefix, wsi, buflen, ws_client->buflen, strlen(response));
+						JANUS_LOG(LOG_HUGE, "[%s-%p] Re-allocating to %d bytes (was %d, response is %zu bytes)\n", log_prefix, wsi, buflen, ws_client->buflen, strlen(response));
 						ws_client->buflen = buflen;
 						ws_client->buffer = g_realloc(ws_client->buffer, buflen);
 					}
 					memcpy(ws_client->buffer + LWS_SEND_BUFFER_PRE_PADDING, response, strlen(response));
-					JANUS_LOG(LOG_VERB, "[%s-%p] Sending WebSocket message (%zu bytes)...\n", log_prefix, wsi, strlen(response));
+					JANUS_LOG(LOG_HUGE, "[%s-%p] Sending WebSocket message (%zu bytes)...\n", log_prefix, wsi, strlen(response));
 #ifdef HAVE_LIBWEBSOCKETS_NEWAPI
 					int sent = lws_write(wsi, ws_client->buffer + LWS_SEND_BUFFER_PRE_PADDING, strlen(response), LWS_WRITE_TEXT);
 #else
 					int sent = libwebsocket_write(wsi, ws_client->buffer + LWS_SEND_BUFFER_PRE_PADDING, strlen(response), LWS_WRITE_TEXT);
 #endif
-					JANUS_LOG(LOG_VERB, "[%s-%p]   -- Sent %d/%zu bytes\n", log_prefix, wsi, sent, strlen(response));
+					JANUS_LOG(LOG_HUGE, "[%s-%p]   -- Sent %d/%zu bytes\n", log_prefix, wsi, sent, strlen(response));
 					if(sent > -1 && sent < (int)strlen(response)) {
 						/* We couldn't send everything in a single write, we'll complete this in the next round */
 						ws_client->bufpending = strlen(response) - sent;
 						ws_client->bufoffset = LWS_SEND_BUFFER_PRE_PADDING + sent;
-						JANUS_LOG(LOG_VERB, "[%s-%p]   -- Couldn't write all bytes (%d missing), setting offset %d\n",
+						JANUS_LOG(LOG_HUGE, "[%s-%p]   -- Couldn't write all bytes (%d missing), setting offset %d\n",
 							log_prefix, wsi, ws_client->bufpending, ws_client->bufoffset);
 					}
 					/* We can get rid of the message */
-					g_free(response);
+					free(response);
 					/* Done for this round, check the next response/notification later */
 #ifdef HAVE_LIBWEBSOCKETS_NEWAPI
 					lws_callback_on_writable(wsi);
@@ -1189,22 +1277,22 @@ static int janus_websockets_common_callback(
 			return 0;
 		}
 		case LWS_CALLBACK_CLOSED: {
-			JANUS_LOG(LOG_VERB, "[%s-%p] WS connection closed\n", log_prefix, wsi);
+			JANUS_LOG(LOG_VERB, "[%s-%p] WS connection down, closing\n", log_prefix, wsi);
 			janus_websockets_destroy_client(ws_client, wsi, log_prefix);
 			JANUS_LOG(LOG_VERB, "[%s-%p]   -- closed\n", log_prefix, wsi);
 			return 0;
 		}
 		case LWS_CALLBACK_WSI_DESTROY: {
-			JANUS_LOG(LOG_VERB, "[%s-%p] WS connection destroyed\n", log_prefix, wsi);
+			JANUS_LOG(LOG_VERB, "[%s-%p] WS connection down, destroying\n", log_prefix, wsi);
 			janus_websockets_destroy_client(ws_client, wsi, log_prefix);
 			JANUS_LOG(LOG_VERB, "[%s-%p]   -- destroyed\n", log_prefix, wsi);
 			return 0;
 		}
 		default:
 			if(wsi != NULL) {
-				JANUS_LOG(LOG_VERB, "[%s-%p] %d (%s)\n", log_prefix, wsi, reason, janus_websockets_reason_string(reason));
+				JANUS_LOG(LOG_HUGE, "[%s-%p] %d (%s)\n", log_prefix, wsi, reason, janus_websockets_reason_string(reason));
 			} else {
-				JANUS_LOG(LOG_VERB, "[%s] %d (%s)\n", log_prefix, reason, janus_websockets_reason_string(reason));
+				JANUS_LOG(LOG_HUGE, "[%s] %d (%s)\n", log_prefix, reason, janus_websockets_reason_string(reason));
 			}
 			break;
 	}

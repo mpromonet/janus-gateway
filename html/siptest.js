@@ -50,6 +50,8 @@ else
 
 var janus = null;
 var sipcall = null;
+var opaqueId = "siptest-"+Janus.randomString(12);
+
 var started = false;
 var spinner = null;
 
@@ -82,6 +84,7 @@ $(document).ready(function() {
 						janus.attach(
 							{
 								plugin: "janus.plugin.sip",
+								opaqueId: opaqueId,
 								success: function(pluginHandle) {
 									$('#details').remove();
 									sipcall = pluginHandle;
@@ -338,11 +341,13 @@ $(document).ready(function() {
 												$('#dtmf').append('<button class="btn btn-info dtmf">*</button>');
 										}
 										$('.dtmf').click(function() {
-											// Send DTMF tone (inband)
-											sipcall.dtmf({dtmf: { tones: $(this).text()}});
-
-											// You can also send DTMF tones using SIP INFO
-											// sipcall.send({"message": {"request": "dtmf_info", "digit": $(this).text()}});
+											if(adapter.browserDetails.browser === 'chrome') {
+												// Send DTMF tone (inband)
+												sipcall.dtmf({dtmf: { tones: $(this).text()}});
+											} else {
+												// Try sending the DTMF tone using SIP INFO
+												sipcall.send({message: {request: "dtmf_info", digit: $(this).text()}});
+											}
 										});
 									}
 									// Show the peer and hide the spinner when we get a playing event
